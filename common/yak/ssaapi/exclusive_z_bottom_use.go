@@ -28,12 +28,18 @@ func (v *Value) GetBottomUses(opt ...OperationOption) (ret Values) {
 	actx := NewAnalyzeContext(opt...)
 	actx.Self = v
 	actx.direct = BottomUseAnalysis
+	if diag := actx.config.diag; diag != nil {
+		diag.setEntryValue(v)
+	}
 	ret = v.getBottomUses(actx, opt...)
 	if actx.HasUntilNode() {
 		ret = actx.untilMatch
 	}
 	if ret.Count() > dataflowValueLimit {
+		// Keep the original warning text unchanged; the diagnostic line is
+		// appended so existing log greps keep working.
 		log.Warnf("Value BottomUse too many: %d:\n\t%s", ret.Count(), v.StringWithRange())
+		actx.config.reportLimitHit(BottomUseAnalysis, ret.Count())
 		return nil
 	}
 	ret = MergeValues(ret)
@@ -60,11 +66,17 @@ func (v *Value) visitUserFallback(actx *AnalyzeContext, opt ...OperationOption) 
 			return true
 		})
 		if !exist {
-			v.GetAllMember().ForEach(func(value *Value) {
-				_ = actx.pushObject(v, value.GetKey(), value)
-				vals = append(vals, value.getBottomUses(actx, opt...)...)
-				actx.popObject()
-			})
+			// Same reasoning as the topdef Make path: a descent is a function of
+			// (value, ancestor context), so re-entering this object under an
+			// identical ancestor stack can only re-derive the same member
+			// results. Reuse the cached expansion instead of re-walking every
+			// member. A different ancestor context is a different key and is
+			// still walked normally.
+			if cached, ok := actx.cachedMakeExpansion(v.GetId()); ok {
+				vals = append(vals, cached...)
+			} else {
+				vals = append(vals, v.expandMembersForBottomUse(actx, opt...)...)
+			}
 		}
 	}
 	if v.IsMember() {
@@ -94,6 +106,25 @@ func (v *Value) visitUserFallback(actx *AnalyzeContext, opt ...OperationOption) 
 	if len(vals) == 0 {
 		return Values{v}
 	}
+	return vals
+}
+
+// expandMembersForBottomUse walks every member of this object, descending each
+// one under a pushed (object, key, member) context. The result is memoized per
+// (ancestor context, object) so a recursive member graph is not re-walked with
+// an identical expansion; every member is still visited, so no reachable value
+// is dropped.
+func (v *Value) expandMembersForBottomUse(actx *AnalyzeContext, opt ...OperationOption) Values {
+	var vals Values
+	members := v.GetAllMember()
+	actx.config.recordObjectExpansion(len(members))
+	actx.config.recordObjectExpanded(v.GetId())
+	members.ForEach(func(value *Value) {
+		_ = actx.pushObject(v, value.GetKey(), value)
+		vals = append(vals, value.getBottomUses(actx, opt...)...)
+		actx.popObject()
+	})
+	actx.cacheMakeExpansion(v.GetId(), vals)
 	return vals
 }
 

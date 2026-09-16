@@ -441,6 +441,10 @@ func DataFlowWithSFConfig(
 	if budget := config.GetWorkBudget(); budget != nil {
 		options = append(options, WithExclusiveWorkBudget(budget))
 	}
+	// Attach rule-level context so limit-hit warnings name the rule and program
+	// instead of dumping a bare oversized value.
+	diag := newDataflowDiagnostics(ruleNameForDiagnostics(sfResult), ruleTitleForDiagnostics(sfResult), dataflowProgramName(value))
+	options = append(options, WithDataflowDiagnostics(diag))
 	var dataflowRecursiveFunc func(options ...OperationOption) Values
 	if analysisType == TopDefAnalysis {
 		dataflowRecursiveFunc = value.GetTopDefs

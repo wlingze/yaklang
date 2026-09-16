@@ -35,12 +35,18 @@ func (i *Value) GetTopDefs(opt ...OperationOption) (ret Values) {
 	actx := NewAnalyzeContext(opt...)
 	actx.Self = i
 	actx.direct = TopDefAnalysis
+	if diag := actx.config.diag; diag != nil {
+		diag.setEntryValue(i)
+	}
 	ret = i.getTopDefs(actx, opt...)
 	if actx.HasUntilNode() {
 		ret = actx.untilMatch
 	}
 	if ret.Count() > dataflowValueLimit {
+		// Keep the original warning text unchanged; the diagnostic line is
+		// appended so existing log greps keep working.
 		log.Warnf("Value TopDef too many: %d: %s", ret.Count(), i.StringForDataflowWarn())
+		actx.config.reportLimitHit(TopDefAnalysis, ret.Count())
 		return nil
 	}
 	ret = MergeValues(ret)
@@ -688,8 +694,20 @@ func (i *Value) getTopDefs(actx *AnalyzeContext, opt ...OperationOption) (result
 	case *ssa.Make:
 		var values Values
 		values = append(values, i)
+
+		// A descent is a function of (value, ancestor context): re-entering this
+		// object under an identical ancestor stack can only re-derive the same
+		// member results. Return the cached expansion instead of re-walking it,
+		// which removes the duplicate work without dropping any member. A
+		// different ancestor context is a different key and is still walked.
+		if cached, ok := actx.cachedMakeExpansion(i.GetId()); ok {
+			return cached
+		}
+
 		var allmember map[ssa.Value]ssa.Value
 		allmember = inst.GetAllMember()
+		actx.config.recordObjectExpansion(len(allmember))
+		actx.config.recordObjectExpanded(i.GetId())
 		for key, member := range allmember {
 			if utils.IsNil(key) || utils.IsNil(member) {
 				continue
@@ -709,6 +727,7 @@ func (i *Value) getTopDefs(actx *AnalyzeContext, opt ...OperationOption) (result
 				actx.popObject()
 			}
 		}
+		actx.cacheMakeExpansion(i.GetId(), values)
 		return values
 	case *ssa.ExternLib:
 		// ExternLib represents external library references, which don't support dataflow analysis

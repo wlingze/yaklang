@@ -31,6 +31,11 @@ type OperationConfig struct {
 
 	programOverLay *ProgramOverLay // for program overlay analysis
 	structBound    *structBound
+
+	// diag carries rule-level context (rule name, program name) into the
+	// recursive descent so limit-hit warnings can attribute the blow-up to the
+	// rule that triggered it. nil when the caller did not supply it.
+	diag *dataflowDiagnostics
 }
 
 type OperationOption func(*OperationConfig)
@@ -105,6 +110,52 @@ func WithExclusiveWorkBudget(b *sf.RuleWorkBudget) OperationOption {
 	return func(operationConfig *OperationConfig) {
 		operationConfig.workBudget = b
 	}
+}
+
+// WithDataflowDiagnostics attaches rule-level context (rule name, program name)
+// to the dataflow config so limit-hit warnings can report which rule and
+// project caused the blow-up. See dataflowDiagnostics.
+func WithDataflowDiagnostics(d *dataflowDiagnostics) OperationOption {
+	return func(operationConfig *OperationConfig) {
+		operationConfig.diag = d
+	}
+}
+
+// recordObjectExpansion notes that an object's full member set was expanded
+// during traversal. A no-op when no diagnostics are attached.
+func (c *OperationConfig) recordObjectExpansion(pairs int) {
+	if c == nil {
+		return
+	}
+	c.diag.recordObjectExpansion(pairs)
+}
+
+// recordObjectExpanded notes that a specific object was expanded, so repeated
+// widening of the same object can be detected. A no-op without diagnostics.
+func (c *OperationConfig) recordObjectExpanded(id int64) {
+	if c == nil {
+		return
+	}
+	c.diag.recordObjectExpanded(id)
+}
+
+// recordCallFanout notes that a call/return site fanned out over N callers.
+// A no-op when no diagnostics are attached.
+func (c *OperationConfig) recordCallFanout(n int) {
+	if c == nil {
+		return
+	}
+	c.diag.recordCallFanout(n)
+}
+
+// reportLimitHit emits the appended diagnostic line for a limit hit. It is a
+// no-op when no diagnostics are attached, so the original warning remains the
+// only output in that case.
+func (c *OperationConfig) reportLimitHit(direct AnalysisType, resultCount int) {
+	if c == nil {
+		return
+	}
+	c.diag.reportLimitHit(direct, resultCount)
 }
 
 func NewOperations(opt ...OperationOption) *OperationConfig {

@@ -3,6 +3,8 @@ package ssaapi
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"github.com/yaklang/yaklang/common/utils"
@@ -58,6 +60,15 @@ type AnalyzeContext struct {
 	// savedPath map[*Value]struct{}
 	recursiveStatusIsLeaf *utils.Stack[node]
 
+	// makeExpansionMemo caches the result of expanding a *ssa.Make object,
+	// keyed by the ancestor stack plus the object id. A descent is a function of
+	// (value, ancestor context), so re-entering the same object under the same
+	// ancestors can only re-derive the same member results; returning the cached
+	// values avoids redoing an identical walk. A different ancestor context is a
+	// different key and is still walked normally, so no reachable value is lost.
+	// Scoped to one descent.
+	makeExpansionMemo map[makeExpansionKey]Values
+
 	// resolvedInstCache memoizes the resolved underlying instruction for each
 	// (program, inst-id) touched during THIS descent (one GetTopDefs /
 	// GetBottomUses AnalyzeContext lifetime). A2 in scan-perf-optimization-plan:
@@ -77,6 +88,70 @@ type AnalyzeContext struct {
 type resolvedInstKey struct {
 	prog   *ssa.Program
 	instID int64
+}
+
+// makeExpansionKey identifies one Make expansion inside a descent by the
+// ancestor context and the object being expanded.
+type makeExpansionKey struct {
+	trace    string
+	objectID int64
+}
+
+// makeExpansionMemoLimit bounds the per-descent Make-expansion memo. The memo
+// exists to skip duplicate work; capping it keeps memory bounded on a
+// pathological descent while preserving correctness (uncached entries are
+// simply walked again).
+const makeExpansionMemoLimit = 4096
+
+// currentExpansionTrace renders the object stack (object:key pairs) as a string
+// for use as a memo key. The stack is bounded by objectAnalyzeLevel, so this
+// stays small. The key is included because the same object reached through a
+// different key resolves to a different member.
+func (a *AnalyzeContext) currentExpansionTrace() string {
+	if a == nil {
+		return ""
+	}
+	var b strings.Builder
+	a.foreachObjectStack(func(obj *Value, key *Value, member *Value) bool {
+		if obj != nil {
+			b.WriteString(strconv.FormatInt(obj.GetId(), 10))
+		}
+		b.WriteByte(':')
+		if key != nil {
+			b.WriteString(strconv.FormatInt(key.GetId(), 10))
+		}
+		b.WriteByte(',')
+		return true
+	})
+	return b.String()
+}
+
+// cachedMakeExpansion returns a previously computed expansion for this
+// (ancestor context, object) pair.
+func (a *AnalyzeContext) cachedMakeExpansion(objectID int64) (Values, bool) {
+	if a == nil || objectID <= 0 || a.makeExpansionMemo == nil {
+		return nil, false
+	}
+	vals, ok := a.makeExpansionMemo[makeExpansionKey{trace: a.currentExpansionTrace(), objectID: objectID}]
+	return vals, ok
+}
+
+// cacheMakeExpansion stores the full expansion result for this
+// (ancestor context, object) pair.
+func (a *AnalyzeContext) cacheMakeExpansion(objectID int64, vals Values) {
+	if a == nil || objectID <= 0 {
+		return
+	}
+	if a.makeExpansionMemo == nil {
+		a.makeExpansionMemo = make(map[makeExpansionKey]Values)
+	}
+	// Bound the memo so a pathological descent cannot trade a CPU blow-up for
+	// an unbounded one. Past the cap we simply stop caching: the walk still
+	// runs and returns the same values, it just loses the dedup for new keys.
+	if len(a.makeExpansionMemo) >= makeExpansionMemoLimit {
+		return
+	}
+	a.makeExpansionMemo[makeExpansionKey{trace: a.currentExpansionTrace(), objectID: objectID}] = vals
 }
 
 type node struct {
