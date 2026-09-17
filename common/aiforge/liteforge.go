@@ -73,6 +73,11 @@ type LiteForge struct {
 	emitter              *aicommon.Emitter
 
 	OutputJsonHook []jsonextractor.CallbackOption
+
+	// extraRequestOpts carries AIRequestOption values that are appended to
+	// reqOpts during Execute, allowing callers to inject parameters like
+	// aispec.WithThinkingLevel("none") through the LiteForge option chain.
+	extraRequestOpts []aicommon.AIRequestOption
 }
 
 func WithLiteForge_Emitter(emitter *aicommon.Emitter) LiteForgeOption {
@@ -297,6 +302,17 @@ func WithLiteForge_StaticInstruction(i string) LiteForgeOption {
 	}
 }
 
+// WithLiteForge_ExtraRequestOpts carries additional AIRequestOption values
+// that are appended to reqOpts during Execute, allowing callers to inject
+// parameters (e.g. aispec.WithThinkingLevel("none")) through the LiteForge
+// option chain. Used by the auxiliary task scheduler for LiteCall degradation.
+func WithLiteForge_ExtraRequestOpts(opts ...aicommon.AIRequestOption) LiteForgeOption {
+	return func(forge *LiteForge) error {
+		forge.extraRequestOpts = append(forge.extraRequestOpts, opts...)
+		return nil
+	}
+}
+
 // WithLiteForge_DynamicInstruction 是 WithLiteForge_Prompt 的语义别名,
 // 显式表达"该 instruction 是 dynamic 段, 进 dynamic 而非 semi-dynamic"。
 // 调用方在重构时 (P0-B4) 把 prompt 字符串拆成静态 + 动态两部分时,
@@ -400,6 +416,9 @@ func (l *LiteForge) ExecuteEx(ctx context.Context, params []*ypb.ExecParamItem, 
 		aicommon.WithAIRequest_Context(ctx),
 		aicommon.WithAIRequest_CallerLabel(fmt.Sprintf("liteforge[%v]", forgeLabelName)),
 	)
+	if len(l.extraRequestOpts) > 0 {
+		reqOpts = append(reqOpts, l.extraRequestOpts...)
+	}
 	transactionErr := aicommon.CallAITransactionWithFailureExtra(cod, rendered, aiCallback,
 		func(response *aicommon.AIResponse) error {
 			boundEmitter := response.BindEmitter(l.emitter)
